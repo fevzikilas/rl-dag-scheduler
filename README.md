@@ -8,7 +8,12 @@
 ## Overview
 
 This repository contains the full implementation of a **Reinforcement Learning-based DAG scheduler** for single-GPU inference. The agent (MaskablePPO + GNN encoder) learns to assign computation graph operators to parallel CUDA streams while minimising execution makespan and enforcing shared VRAM limits via action masking.
+<!--
+KONUYU ANLATIRKEN OZELLIKLE DATASETI AYRICA PAYLASIRKEN PROBLEMI ACIKLAMAK ICIN KULLANABILECEGIMIZ LINKLER
+- https://www.geeksforgeeks.org/deep-learning/computational-graphs-in-deep-learning/ 
+- 
 
+-->
 Key design goal: **zero-shot hardware generalisation** — both GPU memory capacity (4–100 GB) and CUDA stream count (2–8) are randomised per episode during training, so a single trained model adapts at inference time to any GPU in those ranges without retraining.
 <!--  Aslinda random olmasinin asil amaci herhangi bir settingi ezberlemesini istemiyoruz   -->
 
