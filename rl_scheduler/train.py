@@ -64,20 +64,19 @@ def run_agent_on_graph(model, g, encoder, device,
     return info.get("makespan", float("inf"))
 
 
-def eval_agent(model, graphs, encoder, device, n_ep: int = 20,
+def eval_agent(model, graphs, encoder, device, 
                gpu_memory=None, n_streams=None) -> float:
-    sample = random.sample(graphs, min(n_ep, len(graphs)))
-    ms     = [run_agent_on_graph(model, g, encoder, device, gpu_memory, n_streams)
-              for g in sample]
+    """Run agent on every graph in `graphs`; return mean makespan."""
+    ms = [run_agent_on_graph(model, g, encoder, device, gpu_memory, n_streams)
+          for g in graphs]
     return float(np.mean(ms))
 
 
-def eval_baselines(graphs, n_ep: int = 20):
-    sample   = random.sample(graphs, min(n_ep, len(graphs)))
+def eval_baselines(graphs):
     gpu_mem  = config.GPU_MEMORY_DEFAULT
     n_s      = config.N_STREAMS_DEFAULT
-    heft_ms  = [heft(g, gpu_memory=gpu_mem, n_streams=n_s)["makespan"] for g in sample]
-    rr_ms    = [round_robin(g, gpu_memory=gpu_mem, n_streams=n_s)["makespan"] for g in sample]
+    heft_ms  = [heft(g, gpu_memory=gpu_mem, n_streams=n_s)["makespan"] for g in graphs] 
+    rr_ms    = [round_robin(g, gpu_memory=gpu_mem, n_streams=n_s)["makespan"] for g in graphs]
     return float(np.mean(heft_ms)), float(np.mean(rr_ms))
 
 
@@ -87,22 +86,29 @@ class SchedulingEvalCallback(BaseCallback):
     Saves best checkpoint by RL/HEFT ratio. Logs each eval to CSV.
     """
 
-    def __init__(self, test_graphs, encoder, device, heft_mean,
+    def __init__(self, test_graphs, encoder, device,
                  eval_freq: int, n_eval_ep: int, checkpoint_dir: str,
                  log_path: str, verbose: int = 1):
         super().__init__(verbose)
         self.test_graphs    = test_graphs
         self.encoder        = encoder
         self.device         = device
-        self.heft_mean      = heft_mean
         self.eval_freq      = eval_freq
         self.n_eval_ep      = n_eval_ep
         self.checkpoint_dir = checkpoint_dir
         self.log_path       = log_path
         self.best_ratio     = float("inf")
         self._calls_since   = 0
-        # Write CSV header
-        os.makedirs(os.path.dirname(log_path), exist_ok=True)
+        # Fixed eval subset — same graphs every time for consistent comparison
+        rng = random.Random(config.SEED)
+        self.eval_graphs = rng.sample(test_graphs, min(n_eval_ep, len(test_graphs)))
+        # Recompute heft_mean on the same fixed subset
+        gpu_mem = config.GPU_MEMORY_DEFAULT
+        n_s     = config.N_STREAMS_DEFAULT
+        self.heft_mean = float(np.mean(
+            [heft(g, gpu_memory=gpu_mem, n_streams=n_s)["makespan"]
+             for g in self.eval_graphs]
+        ))
         with open(log_path, "w", newline="") as f:
             csv.writer(f).writerow(
                 ["step", "rl_makespan", "heft_makespan", "ratio",
@@ -120,14 +126,14 @@ class SchedulingEvalCallback(BaseCallback):
         gpu_mem = config.GPU_MEMORY_DEFAULT
         n_s     = config.N_STREAMS_DEFAULT
 
-        ms    = eval_agent(self.model, self.test_graphs, self.encoder,
-                           self.device, self.n_eval_ep,
-                           gpu_memory=gpu_mem, n_streams=n_s)
+        ms    = eval_agent(self.model, self.eval_graphs, self.encoder,
+                           self.device, gpu_memory=gpu_mem, n_streams=n_s)
         ratio = ms / max(self.heft_mean, 1e-9)
         tag   = "BETTER" if ratio < 1.0 else "WORSE"
 
-        # ep_rew_mean from SB3 logger (may be absent early on)
-        ep_rew = self.logger.name_to_value.get("rollout/ep_rew_mean", float("nan"))
+        # read episode reward from SB3's rolling buffer (works with VecMonitor)
+        buf = self.model.ep_info_buffer
+        ep_rew = float(np.mean([ep["r"] for ep in buf])) if buf else float("nan")
         wall   = time.time() - self._train_start
 
         if self.verbose:
@@ -166,19 +172,14 @@ def main():
     device = "cuda" if torch.cuda.is_available() else "cpu"
     print(f"Device: {device}\n")
 
-    # ── 1. Data ───────────────────────────────────────────────────────
     train_graphs, test_graphs = load_all_graphs(seed=config.SEED)
 
-    # ── 2. GNN Encoder (frozen during PPO; weights from random init) ──
-    #    For a better start, consider pre-training on a node-property
-    #    regression task before running PPO.
     encoder = NodeEncoder().to(device)
-    encoder.eval()   # always eval mode (no gradient needed here)
+    encoder.eval()
     n_enc_params = sum(p.numel() for p in encoder.parameters())
     print(f"NodeEncoder parameters: {n_enc_params:,}")
 
-    # ── 3. Vectorised Environment ─────────────────────────────────────
-    N_ENVS = 1     # increase if you have multiple CPUs and want parallelism
+    N_ENVS = 1
     print(f"Creating {N_ENVS} environment(s) …")
     vec_env = VecMonitor(
         DummyVecEnv([make_env(train_graphs, encoder, device, i) for i in range(N_ENVS)])
@@ -212,7 +213,7 @@ def main():
 
 
     print("Computing baselines on test set …")
-    heft_mean, rr_mean = eval_baselines(test_graphs, n_ep=min(20, len(test_graphs)))
+    heft_mean, rr_mean = eval_baselines(test_graphs)
     print(f"  HEFT mean makespan       : {heft_mean:.4f}")
     print(f"  Round Robin mean makespan: {rr_mean:.4f}\n")
 
@@ -224,7 +225,6 @@ def main():
         test_graphs    = test_graphs,
         encoder        = encoder,
         device         = device,
-        heft_mean      = heft_mean,
         eval_freq      = config.EVAL_FREQ,
         n_eval_ep      = config.N_EVAL_EPISODES,
         checkpoint_dir = config.CHECKPOINT_DIR,
@@ -245,9 +245,9 @@ def main():
     # final eval on fixed hardware
     gpu_mem  = config.GPU_MEMORY_DEFAULT
     n_s      = config.N_STREAMS_DEFAULT
-    final_ms = eval_agent(model, test_graphs, encoder, device, n_ep=50,
+    final_ms = eval_agent(model, test_graphs, encoder, device,
                           gpu_memory=gpu_mem, n_streams=n_s)
-    heft_final, rr_final = eval_baselines(test_graphs, n_ep=min(50, len(test_graphs)))
+    heft_final, rr_final = eval_baselines(test_graphs)
     print("\n" + "=" * 65)
     print("  FINAL RESULTS (test set, fixed: 8 GB / 4 streams)")
     print("=" * 65)
