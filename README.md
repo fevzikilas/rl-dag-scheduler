@@ -1,4 +1,4 @@
-﻿# Task Scheduling in High-Performance Computing Environments with Reinforcement Learning
+﻿# Task Scheduling in High-Performance Computing Environments with Renforcement Learningi
 
 > **Hacettepe University**  
 > Fevzi Kılas · Ahmet Deniz Güner · Yunus Can Bilge
@@ -263,38 +263,6 @@ n_streams    ~ randint(2, 9)            # {2, 3, 4, 5, 6, 7, 8}
 ```
 
 Both values are encoded in the `gpu_state` observation, enabling the policy to adapt zero-shot to any hardware configuration in those ranges at evaluation time.
-
----
-
-## Paper
-
-The LaTeX source for the accompanying ICLR-format report is in [`main.tex`](main.tex).
-
-To compile:
-```bash
-pdflatex main.tex
-bibtex main
-pdflatex main.tex
-pdflatex main.tex
-```
-
----
-
-## Dependencies
-
-See [`requirements_rl.txt`](requirements_rl.txt). Key packages:
-
-| Package | Purpose |
-|---|---|
-| `torch >= 2.0` | Neural network backend |
-| `gymnasium >= 0.29` | RL environment interface |
-| `stable-baselines3 >= 2.0` | PPO implementation |
-| `sb3-contrib >= 2.0` | MaskablePPO (action masking) |
-| `networkx >= 3.0` | DAG representation |
-| `datasets` | HuggingFace dataset loading (cache build only) |
-| `pandas`, `matplotlib` | Evaluation and plotting |
-
----
 
 ## License
 
