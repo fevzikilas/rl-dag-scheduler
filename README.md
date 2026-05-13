@@ -1,4 +1,4 @@
-﻿# Task Scheduling in High-Performance Computing Environments with Renforcement Learningi
+﻿# Task Scheduling in High-Performance Computing Environments with Renforcement Learning
 
 > **Hacettepe University**  
 > Fevzi Kılas · Ahmet Deniz Güner · Yunus Can Bilge
