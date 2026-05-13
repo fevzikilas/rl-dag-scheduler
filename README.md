@@ -19,7 +19,6 @@ Key design goal: **zero-shot hardware generalisation** — both GPU memory capac
 
 - **Dataset:** 172 real-world DAGs extracted from CNNs, Vision Transformers, and BERT-family models — published as [`nieche/DL-Architectural-DAGs-2026`](https://huggingface.co/datasets/nieche/DL-Architectural-DAGs-2026) on HuggingFace Hub.
 - **Baselines:** HEFT (Heterogeneous Earliest Finish Time) and Round Robin.
-- **Paper:** ICLR-format report in [`main.tex`](main.tex).
 
 ---
 
