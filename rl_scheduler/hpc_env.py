@@ -18,6 +18,7 @@ import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 import config
 from data_loader import compute_node_features, build_edge_index
+from baselines import heft as _heft
 
 
 class HPCClusterEnv(gym.Env):
@@ -45,10 +46,11 @@ class HPCClusterEnv(gym.Env):
         self.observation_space = spaces.Dict({
             "task_emb":  spaces.Box(-np.inf, np.inf,
                                     (config.HIDDEN_DIM,), dtype=np.float32),
+            # 4 features per stream: [avail_norm, eft_norm, load_norm, active_flag]
             "proc_feat": spaces.Box(-np.inf, np.inf,
-                                    (config.MAX_STREAMS * 3,), dtype=np.float32),
-            # gpu_state: [vram_used_norm, gpu_cap_norm, n_streams_norm, progress_norm]
-            "gpu_state": spaces.Box(0.0, 1.0, (4,), dtype=np.float32),
+                                    (config.MAX_STREAMS * 4,), dtype=np.float32),
+            # [vram_used_norm, gpu_cap_norm, n_streams_norm, progress_norm, queue_depth_norm]
+            "gpu_state": spaces.Box(0.0, 1.0, (5,), dtype=np.float32),
             "valid_mask": spaces.MultiBinary(config.MAX_STREAMS),
         })
 
@@ -66,6 +68,7 @@ class HPCClusterEnv(gym.Env):
         self.n_assigned          = 0
         self.n_total             = 0
         self.lower_bound         = 1.0
+        self.heft_makespan       = 1.0   # HEFT baseline for this episode's graph+hardware
         self.gpu_capacity        = config.GPU_MEMORY_DEFAULT
         self.vram_used           = 0.0
         self.vram_live: dict     = {}  # task_idx → output bytes
@@ -123,6 +126,9 @@ class HPCClusterEnv(gym.Env):
         self.n_assigned  = 0
         self.n_total     = n
         self.lower_bound = self._compute_lower_bound()
+        self.heft_makespan = _heft(
+            self.g, gpu_memory=self.gpu_capacity, n_streams=self.n_streams
+        )["makespan"]
 
         self._check_deadlock()
         return self._get_obs(), {}
@@ -134,13 +140,10 @@ class HPCClusterEnv(gym.Env):
         task_node = self.nodes[task_idx]
 
         out_bytes = self.g.nodes[task_node].get("transfer_byte", 0.0)
-        if self.vram_used + out_bytes > self.gpu_capacity:
-            return (
-                self._get_obs(),
-                config.INVALID_ACTION_PENALTY,
-                False, False,
-                {"invalid": True},
-            )
+        if (self.vram_used + out_bytes) > self.gpu_capacity:
+            # VRAM full: mask fallback opened this stream, proceed without charging VRAM
+            # (prevents infinite loop; a warning was already issued by get_action_mask)
+            out_bytes = 0.0
 
         # no inter-stream comm cost (same device)
         earliest_start = self.proc_avail_time[stream_id]
@@ -156,8 +159,15 @@ class HPCClusterEnv(gym.Env):
         self.vram_used += out_bytes
         self.vram_live[task_idx] = out_bytes
 
+        # 
+        # 
+        # 
+        # normalize by lower_bound so idle penalty is on same scale as terminal reward
+
+
         idle_created = max(0.0, earliest_start - self.proc_avail_time[stream_id])
-        reward       = -idle_created * config.IDLE_PENALTY
+        idle_norm    = idle_created / max(self.lower_bound, 1e-9)
+        reward       = -idle_norm * config.IDLE_PENALTY
 
         self.task_finish_time[task_idx]   = finish_time
         self.task_proc_assigned[task_idx] = stream_id
@@ -192,11 +202,24 @@ class HPCClusterEnv(gym.Env):
 
         if terminated:
             makespan = float(np.max(self.task_finish_time))
-            reward  += -(makespan / max(self.lower_bound, 1e-9))
+
+            #
+            #     HEFT-relative terminal reward -> positive when RL beats HEFT, negative otherwise 
+            #
+            #
+            #
+            
+            terminal_r = float(np.clip(
+                (self.heft_makespan - makespan) / max(self.heft_makespan, 1e-9) * 10,
+                -10.0, 10.0
+            ))
+            reward += terminal_r
             info = {
                 "makespan":        makespan,
+                "heft_makespan":   self.heft_makespan,
                 "lower_bound":     self.lower_bound,
                 "ratio":           makespan / max(self.lower_bound, 1e-9),
+                "rl_vs_heft":      makespan / max(self.heft_makespan, 1e-9),
                 "gpu_capacity_gb": self.gpu_capacity / 1e9,
                 "n_streams":       self.n_streams,
             }
@@ -221,7 +244,9 @@ class HPCClusterEnv(gym.Env):
         fits = (self.vram_used + out_bytes) <= self.gpu_capacity
         mask[:self.n_streams] = fits
 
-        # if nothing fits, open all active streams to avoid a deadlock
+        #  - if nothing fits, open all active streams to avoid a deadlock
+
+
         if not mask.any():
             warnings.warn(
                 f"VRAM full ({self.vram_used/1e9:.2f}/{self.gpu_capacity/1e9:.2f} GB) "
@@ -237,26 +262,49 @@ class HPCClusterEnv(gym.Env):
         if not self.ready_queue:
             return self._zero_obs()
 
-        task_idx = self.ready_queue[0]
-        task_emb = self.node_embeddings[task_idx].astype(np.float32)
+        task_idx  = self.ready_queue[0]
+        task_node = self.nodes[task_idx]
+        task_emb  = self.node_embeddings[task_idx].astype(np.float32)
 
-        # [avail_time_norm, load_norm, active_flag] per slot; inactive slots = 0
-        max_time  = max(float(self.proc_avail_time[:self.n_streams].max()), 1e-9)
-        max_load  = max(int(self.n_total), 1)
-        proc_feat = np.zeros(config.MAX_STREAMS * 3, dtype=np.float32)
+        task_flops   = self.g.nodes[task_node].get("flops", 0.0)
+        task_compute = max(task_flops / self.stream_flops, 1e-9)
+
+        # earliest data-ready time (max finish of all parents)
+
+        parent_max = max(
+            (self.task_finish_time[self.node_idx[p]]
+             for p in self.g.predecessors(task_node)),
+            default=0.0
+        )
+
+        # EFT per stream -> when would this task finish if assigned here
+
+        eft = np.array([
+            max(self.proc_avail_time[s], parent_max) + task_compute
+            for s in range(self.n_streams)
+        ], dtype=np.float64)
+
+        time_scale = max(float(eft.max()), 1e-9)
+        max_load   = max(int(self.n_total), 1)
+
+        # 4 features per slot: [ avail_norm , eft_norm, load_norm, active_flag ]
+
+        proc_feat = np.zeros(config.MAX_STREAMS * 4, dtype=np.float32)
         for s in range(self.n_streams):
-            base = s * 3
-            proc_feat[base]     = self.proc_avail_time[s] / max_time
-            proc_feat[base + 1] = self.proc_n_tasks[s]    / max_load
-            proc_feat[base + 2] = 1.0
+            base = s * 4
+            proc_feat[base]     = self.proc_avail_time[s] / time_scale
+            proc_feat[base + 1] = eft[s] / time_scale
+            proc_feat[base + 2] = self.proc_n_tasks[s] / max_load
+            proc_feat[base + 3] = 1.0
 
-        # GPU state: [vram_used_norm, gpu_cap_norm, n_streams_norm, progress_norm]
+        queue_depth = len(self.ready_queue) / max(self.n_total, 1)
         gpu_state = np.array([
             min(self.vram_used / max(self.gpu_capacity, 1.0), 1.0),
             min(self.gpu_capacity / config.GPU_MEMORY_MAX, 1.0),
             (self.n_streams - config.N_STREAMS_MIN) /
                 max(config.N_STREAMS_MAX - config.N_STREAMS_MIN, 1),
             self.n_assigned / max(self.n_total, 1),
+            min(queue_depth, 1.0),
         ], dtype=np.float32)
 
         valid_mask = self.get_action_mask().astype(np.int8)
@@ -266,9 +314,9 @@ class HPCClusterEnv(gym.Env):
 
     def _zero_obs(self) -> dict:
         return {
-            "task_emb":  np.zeros(config.HIDDEN_DIM, dtype=np.float32),
-            "proc_feat": np.zeros(config.MAX_STREAMS * 3, dtype=np.float32),
-            "gpu_state": np.zeros(4, dtype=np.float32),
+            "task_emb":   np.zeros(config.HIDDEN_DIM, dtype=np.float32),
+            "proc_feat":  np.zeros(config.MAX_STREAMS * 4, dtype=np.float32),
+            "gpu_state":  np.zeros(5, dtype=np.float32),
             "valid_mask": np.ones(config.MAX_STREAMS, dtype=np.int8),
         }
 

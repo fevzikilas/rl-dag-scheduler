@@ -11,6 +11,7 @@ import numpy as np
 import torch
 from stable_baselines3.common.vec_env import DummyVecEnv, VecMonitor
 from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.utils import get_linear_fn
 
 # MaskablePPO (sb3-contrib) preferred; fallback to standard PPO
 try:
@@ -46,8 +47,8 @@ def make_env(graphs, encoder, device, seed_offset=0,
 
 
 def run_agent_on_graph(model, g, encoder, device,
-                       gpu_memory=None, n_streams=None) -> float:
-    """Run the trained agent on a single graph; return makespan."""
+                       gpu_memory=None, n_streams=None) -> tuple:
+    """Run agent on a single graph; return (rl_makespan, heft_makespan)."""
     env  = _wrap(HPCClusterEnv([g], encoder, device=device,
                                gpu_memory=gpu_memory, n_streams=n_streams))
     obs, _ = env.reset()
@@ -61,15 +62,19 @@ def run_agent_on_graph(model, g, encoder, device,
             action, _state = model.predict(obs, deterministic=True)
         obs, _r, terminated, truncated, info = env.step(action)
         done = terminated or truncated
-    return info.get("makespan", float("inf"))
+    rl_ms   = info.get("makespan", float("inf"))
+    heft_ms = info.get("heft_makespan", rl_ms)
+    return rl_ms, heft_ms
 
 
-def eval_agent(model, graphs, encoder, device, 
-               gpu_memory=None, n_streams=None) -> float:
-    """Run agent on every graph in `graphs`; return mean makespan."""
-    ms = [run_agent_on_graph(model, g, encoder, device, gpu_memory, n_streams)
-          for g in graphs]
-    return float(np.mean(ms))
+def eval_agent(model, graphs, encoder, device,
+               gpu_memory=None, n_streams=None) -> tuple:
+    """Run agent on every graph; return (mean_rl_makespan, mean_heft_makespan)."""
+    results = [run_agent_on_graph(model, g, encoder, device, gpu_memory, n_streams)
+               for g in graphs]
+    rl_ms   = float(np.mean([r[0] for r in results]))
+    heft_ms = float(np.mean([r[1] for r in results]))
+    return rl_ms, heft_ms
 
 
 def eval_baselines(graphs):
@@ -102,13 +107,6 @@ class SchedulingEvalCallback(BaseCallback):
         # Fixed eval subset — same graphs every time for consistent comparison
         rng = random.Random(config.SEED)
         self.eval_graphs = rng.sample(test_graphs, min(n_eval_ep, len(test_graphs)))
-        # Recompute heft_mean on the same fixed subset
-        gpu_mem = config.GPU_MEMORY_DEFAULT
-        n_s     = config.N_STREAMS_DEFAULT
-        self.heft_mean = float(np.mean(
-            [heft(g, gpu_memory=gpu_mem, n_streams=n_s)["makespan"]
-             for g in self.eval_graphs]
-        ))
         with open(log_path, "w", newline="") as f:
             csv.writer(f).writerow(
                 ["step", "rl_makespan", "heft_makespan", "ratio",
@@ -128,7 +126,8 @@ class SchedulingEvalCallback(BaseCallback):
 
         ms    = eval_agent(self.model, self.eval_graphs, self.encoder,
                            self.device, gpu_memory=gpu_mem, n_streams=n_s)
-        ratio = ms / max(self.heft_mean, 1e-9)
+        rl_ms, heft_ms = ms
+        ratio = rl_ms / max(heft_ms, 1e-9)
         tag   = "BETTER" if ratio < 1.0 else "WORSE"
 
         # read episode reward from SB3's rolling buffer (works with VecMonitor)
@@ -139,7 +138,7 @@ class SchedulingEvalCallback(BaseCallback):
         if self.verbose:
             _tqdm.write(
                 f"\n[Step {self.num_timesteps:>9,}]  "
-                f"RL makespan: {ms:.4f}  |  HEFT: {self.heft_mean:.4f}  "
+                f"RL makespan: {rl_ms:.4f}  |  HEFT: {heft_ms:.4f}  "
                 f"ratio: {ratio:.3f}  ({tag} than HEFT)"
             )
 
@@ -152,7 +151,7 @@ class SchedulingEvalCallback(BaseCallback):
 
         with open(self.log_path, "a", newline="") as f:
             csv.writer(f).writerow(
-                [self.num_timesteps, f"{ms:.6f}", f"{self.heft_mean:.6f}",
+                [self.num_timesteps, f"{rl_ms:.6f}", f"{heft_ms:.6f}",
                  f"{ratio:.4f}", f"{ep_rew:.4f}", f"{wall:.0f}"]
             )
 
@@ -195,7 +194,7 @@ def main():
     model = MaskablePPO(
         "MultiInputPolicy",
         vec_env,
-        learning_rate  = config.PPO_LR,
+        learning_rate  = get_linear_fn(config.PPO_LR, config.PPO_LR * 0.1, 1.0),
         n_steps        = config.PPO_N_STEPS,
         batch_size     = config.PPO_BATCH_SIZE,
         n_epochs       = config.PPO_N_EPOCHS,
@@ -245,16 +244,17 @@ def main():
     # final eval on fixed hardware
     gpu_mem  = config.GPU_MEMORY_DEFAULT
     n_s      = config.N_STREAMS_DEFAULT
-    final_ms = eval_agent(model, test_graphs, encoder, device,
-                          gpu_memory=gpu_mem, n_streams=n_s)
-    heft_final, rr_final = eval_baselines(test_graphs)
+    final_ms, final_heft_ms = eval_agent(model, test_graphs, encoder, device,
+                                         gpu_memory=gpu_mem, n_streams=n_s)
+    _, rr_final    = eval_baselines(test_graphs)
+    ratio_final    = final_ms / max(final_heft_ms, 1e-9)
     print("\n" + "=" * 65)
     print("  FINAL RESULTS (test set, fixed: 8 GB / 4 streams)")
     print("=" * 65)
     print(f"  RL Agent makespan       : {final_ms:.4f}")
-    print(f"  HEFT makespan           : {heft_final:.4f}")
+    print(f"  HEFT makespan           : {final_heft_ms:.4f}")
     print(f"  Round Robin makespan    : {rr_final:.4f}")
-    ratio_final = final_ms / max(heft_final, 1e-9)
+    print(f"  RL / HEFT ratio         : {ratio_final:.3f}")
     print(f"  RL / HEFT ratio         : {ratio_final:.3f}")
     best_ratio  = callback.best_ratio
     print(f"  Best eval ratio (saved) : {best_ratio:.4f}")

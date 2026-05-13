@@ -29,23 +29,23 @@ GAT_DROPOUT  = 0.1
 
 # PPO
 PPO_LR         = 3e-4
-PPO_N_STEPS    = 1024
+PPO_N_STEPS    = 2048   # Ahmet hocam lets try larger rollout → more diverse experience per update 
 PPO_BATCH_SIZE = 64
 PPO_N_EPOCHS   = 10
 PPO_GAMMA      = 0.99
 PPO_GAE_LAMBDA = 0.95
 PPO_CLIP       = 0.2
-PPO_ENT_COEF   = 0.01
-TOTAL_TIMESTEPS = 1_000_000
+PPO_ENT_COEF   = 0.05   # higher entropy → more exploration, at least i hope so 
+TOTAL_TIMESTEPS = 2_000_000
 
 # Reward shaping
-IDLE_PENALTY           = 0.01
-INVALID_ACTION_PENALTY = -50.0
+# IDLE_PENALTY is applied to idle_created/lower_bound (dimensionless), so 0.1 is meaningful
+IDLE_PENALTY = 0.1
 
 # Training / evaluation settings
 TRAIN_RATIO     = 0.80
 SEED            = 42
 LOG_INTERVAL    = 10
 EVAL_FREQ       = 20_000
-N_EVAL_EPISODES = 20
+N_EVAL_EPISODES = 35    # use the full test set for eval
 CHECKPOINT_DIR  = "checkpoints"
