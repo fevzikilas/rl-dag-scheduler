@@ -1,0 +1,24 @@
+# RL Scheduler dependencies
+# Install with: pip install -r requirements_rl.txt
+
+# Core
+torch>=2.0.0
+numpy>=1.24.0
+networkx>=3.0
+
+# Gymnasium + RL
+gymnasium>=0.29.0
+stable-baselines3>=2.0.0
+sb3-contrib>=2.0.0          # MaskablePPO (action masking)
+
+# HuggingFace dataset
+datasets>=2.14.0
+huggingface-hub>=0.16.0
+
+# Optional: true GAT (if not installed, fallback GNN is used)
+torch_geometric             # pip install torch_geometric
+# torch_scatter torch_sparse  # may also be needed for PyG on some platforms
+
+# Evaluation / plotting
+pandas>=2.0.0
+matplotlib>=3.7.0

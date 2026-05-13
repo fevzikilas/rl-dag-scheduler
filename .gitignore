@@ -1,0 +1,58 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Virtual environments
+.venv/
+env/
+venv/
+*.conda/
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Dataset cache (large binary — regenerate with build_cache.py)
+graphs_cache.pkl
+
+# Dataset raw files (large — stored in HuggingFace, not git)
+dataset/final_hpc_dataset.json
+dataset/extraction.log
+dataset/failed_models.json
+
+# Checkpoint binaries (large — use Git LFS or share via release)
+checkpoints/*.zip
+
+# Eval log (generated at runtime)
+checkpoints/eval_log.csv
+
+# LaTeX build artefacts
+*.aux
+*.log
+*.out
+*.toc
+*.bbl
+*.blg
+*.fls
+*.fdb_latexmk
+*.synctex.gz
+*.pdf
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Sensitive — never commit tokens
+.env
+*.env
