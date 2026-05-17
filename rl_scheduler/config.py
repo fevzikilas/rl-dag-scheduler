@@ -29,7 +29,7 @@ GAT_DROPOUT  = 0.1
 
 # PPO
 PPO_LR         = 3e-4
-PPO_N_STEPS    = 2048   # Ahmet hocam lets try larger rollout → more diverse experience per update 
+PPO_N_STEPS    = 2048   # I started with 4096, I will update when it finished
 PPO_BATCH_SIZE = 64
 PPO_N_EPOCHS   = 10
 PPO_GAMMA      = 0.99
