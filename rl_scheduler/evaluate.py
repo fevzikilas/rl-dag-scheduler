@@ -1,6 +1,4 @@
-# evaluate.py — per-graph comparison: RL vs HEFT vs Round Robin
-#
-# Run: python -m rl_scheduler.evaluate --checkpoint checkpoints/best_model
+"""Evaluate trained agent vs baselines on test set."""
 
 import os, sys, argparse, random
 sys.path.insert(0, os.path.dirname(__file__))
@@ -27,7 +25,6 @@ except ImportError:
 
 import config
 from data_loader import load_all_graphs
-from gnn_policy  import NodeEncoder
 from hpc_env     import HPCClusterEnv
 from baselines   import heft, round_robin
 
@@ -38,9 +35,8 @@ def _wrap(env):
     return env
 
 
-def run_agent(model, g, encoder, device, gpu_memory=None,
-              n_streams=None) -> float:
-    env  = _wrap(HPCClusterEnv([g], encoder, device=device,
+def run_agent(model, g, device, gpu_memory=None, n_streams=None) -> float:
+    env  = _wrap(HPCClusterEnv([g], device=device,
                                gpu_memory=gpu_memory, n_streams=n_streams))
     obs, _ = env.reset()
     done   = False
@@ -63,9 +59,6 @@ def main(checkpoint: str):
 
     _, test_graphs = load_all_graphs()
 
-    encoder = NodeEncoder().to(device)
-    encoder.eval()
-
     print(f"Loading model from '{checkpoint}' …")
     model = MaskablePPO.load(checkpoint, device=device)
 
@@ -76,7 +69,7 @@ def main(checkpoint: str):
         model_id = g.graph.get("model_id", f"graph_{i}")
         n_nodes  = len(g)
 
-        rl_ms   = run_agent(model, g, encoder, device,
+        rl_ms   = run_agent(model, g, device,
                             gpu_memory=gpu_mem, n_streams=n_s)
         heft_ms = heft(g, gpu_memory=gpu_mem, n_streams=n_s)["makespan"]
         rr_ms   = round_robin(g, gpu_memory=gpu_mem, n_streams=n_s)["makespan"]
