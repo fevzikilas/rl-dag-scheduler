@@ -18,6 +18,13 @@ venv/
 # Jupyter
 .ipynb_checkpoints/
 
+# Test / lint caches
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
 # Dataset cache (large binary — regenerate with build_cache.py)
 graphs_cache.pkl
 

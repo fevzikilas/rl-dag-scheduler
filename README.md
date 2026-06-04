@@ -1,4 +1,4 @@
-﻿# Task Scheduling in GPU Inference with Reinforcement Learning
+
 
 > **Hacettepe University**  
 > Fevzi Kılas · Ahmet Deniz Güner · Yunus Can Bilge
@@ -7,12 +7,6 @@
 
 ## What is this?
 
-We train an RL agent (MaskablePPO) to schedule computation graph operators onto parallel CUDA streams on a single GPU. The agent learns to assign each operator to a stream in order to minimize total execution time while staying within the GPU memory limit.
-
-**Key feature:** The agent trains on random hardware (4–100 GB memory, 2–8 streams) and works on any GPU in that range without retraining.
-
-- **Dataset:** 172 computation graphs from real models (ResNet, ViT, BERT, etc.) — available on [HuggingFace Hub](https://huggingface.co/datasets/nieche/DL-Architectural-DAGs-2026)
-- **Baselines:** HEFT (standard scheduling algorithm) and Round Robin
 
 ---
 
@@ -109,25 +103,6 @@ Edit `rl_scheduler/config.py` to change training parameters:
 
 5. **Results:** On 35 test graphs, the agent beats HEFT on 25 of them (71%).
 
----
 
-## Dependencies
-
-- `torch >= 2.0`
-- `gymnasium >= 0.29`
-- `stable-baselines3 >= 2.0`
-- `sb3-contrib >= 2.0`
-- `networkx >= 3.0`
-- `datasets` (for downloading data)
-- `pandas`, `matplotlib` (for plots)
-
-Install with:
-```bash
-pip install -r requirements_rl.txt
-```
-
----
-
-## Reference
 
 For technical details, see `main.tex` (ICLR-format paper).

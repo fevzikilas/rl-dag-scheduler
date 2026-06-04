@@ -25,9 +25,6 @@ N_GAT_HEADS  = 4
 N_GAT_LAYERS = 3
 GAT_DROPOUT  = 0.1
 
-# PPO hyperparameters
-PPO_LR         = 3e-4      # decays to 3e-5 over training
-PPO_N_STEPS    = 2048
 PPO_BATCH_SIZE = 64
 PPO_N_EPOCHS   = 10
 PPO_GAMMA      = 0.99

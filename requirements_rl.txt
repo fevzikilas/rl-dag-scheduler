@@ -15,8 +15,8 @@ sb3-contrib>=2.0.0          # MaskablePPO (action masking)
 datasets>=2.14.0
 huggingface-hub>=0.16.0
 
-# Optional: true GAT (if not installed, fallback GNN is used)
-torch_geometric             # pip install torch_geometric
+# Optional: true GAT (if not installed, fallback mean-aggregation GNN is used)
+torch_geometric
 # torch_scatter torch_sparse  # may also be needed for PyG on some platforms
 
 # Evaluation / plotting
