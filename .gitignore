@@ -32,7 +32,10 @@ checkpoints/*.zip
 # Eval log (generated at runtime)
 checkpoints/eval_log.csv
 
-# LaTeX build artefacts
+# LaTeX source and build artefacts
+*.tex
+*.bib
+*.sty
 *.aux
 *.log
 *.out

@@ -1,8 +1,4 @@
-# hpc_env.py — single-GPU list-scheduling environment
-#
-# Obs space: task_emb (GNN), proc_feat (per stream), gpu_state, valid_mask
-# Action:    Discrete(MAX_STREAMS) — assign current ready task to a stream
-# Reward:    idle penalty per step, -(makespan/lower_bound) at terminal
+"""Single-GPU task scheduling environment."""
 
 import warnings
 import random
@@ -10,32 +6,24 @@ from collections import deque
 
 import numpy as np
 import networkx as nx
-import torch
 import gymnasium as gym
 from gymnasium import spaces
 
 import sys, os
 sys.path.insert(0, os.path.dirname(__file__))
 import config
-from data_loader import compute_node_features, build_edge_index
 from baselines import heft as _heft
 
 
 class HPCClusterEnv(gym.Env):
-    """
-    Single-GPU inference scheduling environment.
-
-    Pass gpu_memory=None and n_streams=None during training to randomise
-    hardware each episode. Pass fixed values for deterministic evaluation.
-    """
+    """List-scheduling MDP: assign tasks to GPU streams."""
 
     metadata = {"render_modes": []}
 
-    def __init__(self, graphs: list, gnn_encoder, device: str = "cpu",
+    def __init__(self, graphs: list, device: str = "cpu",
                  gpu_memory: float = None, n_streams: int = None):
         super().__init__()
         self.graphs           = graphs
-        self.encoder          = gnn_encoder
         self.device           = device
         self.gpu_memory_fixed = gpu_memory    # None → randomise each episode
         self.n_streams_fixed  = n_streams     # None → randomise each episode
@@ -44,8 +32,9 @@ class HPCClusterEnv(gym.Env):
         # Inactive slots are zeroed and masked at runtime.
         self.action_space = spaces.Discrete(config.MAX_STREAMS)
         self.observation_space = spaces.Dict({
+            # 6 structural features per task: rank_u, compute, in/out degree, mem, transfer
             "task_emb":  spaces.Box(-np.inf, np.inf,
-                                    (config.HIDDEN_DIM,), dtype=np.float32),
+                                    (config.TASK_FEAT_DIM,), dtype=np.float32),
             # 4 features per stream: [avail_norm, eft_norm, load_norm, active_flag]
             "proc_feat": spaces.Box(-np.inf, np.inf,
                                     (config.MAX_STREAMS * 4,), dtype=np.float32),
@@ -58,7 +47,8 @@ class HPCClusterEnv(gym.Env):
         self.g                   = None
         self.nodes               = None
         self.node_idx: dict      = {}
-        self.node_embeddings     = None
+        self.task_features       = None   # (n, TASK_FEAT_DIM) structural features
+        self.rank_u_vals: dict   = {}     # node_name → raw rank_u (for queue sorting)
         self.ready_queue         = None
         self.task_status         = None
         self.task_finish_time    = None
@@ -99,12 +89,16 @@ class HPCClusterEnv(gym.Env):
             )
         self.stream_flops = config.GPU_FLOPS_CAP / self.n_streams
 
-        feat, _ = compute_node_features(self.g)
-        ei      = build_edge_index(self.g, self.node_idx)
-        with torch.no_grad():
-            x_t  = torch.tensor(feat, dtype=torch.float32).to(self.device)
-            ei_t = torch.tensor(ei,   dtype=torch.long).to(self.device)
-            self.node_embeddings = self.encoder(x_t, ei_t).cpu().numpy()
+        # Pre-compute rank_u so ready_queue can be priority-sorted each step.
+        # rank_u[v] = w[v] + max(rank_u[successors]) — identical to HEFT's priority.
+        self.rank_u_vals = {}
+        for nd in reversed(list(nx.topological_sort(self.g))):
+            compute  = self.g.nodes[nd].get("flops", 0.0) / self.stream_flops
+            succ_max = max((self.rank_u_vals[s] for s in self.g.successors(nd)), default=0.0)
+            self.rank_u_vals[nd] = compute + succ_max
+
+        # Structural features computed after stream_flops is set (rank_u depends on it)
+        self.task_features = self._compute_task_features()
 
         # always MAX_STREAMS wide; slots >= n_streams are inactive (zeroed, masked)
         self.proc_avail_time = np.zeros(config.MAX_STREAMS, dtype=np.float64)
@@ -122,6 +116,8 @@ class HPCClusterEnv(gym.Env):
             if self.g.in_degree(nd) == 0:
                 self.task_status[i] = 1
                 self.ready_queue.append(i)
+        # Sort initial queue by rank_u descending (most urgent task first)
+        self._sort_ready_queue()
 
         self.n_assigned  = 0
         self.n_total     = n
@@ -186,6 +182,10 @@ class HPCClusterEnv(gym.Env):
                 ):
                     self.task_status[c_idx] = 1
                     self.ready_queue.append(c_idx)
+
+        # Re-sort by rank_u so the most urgent task is always at the front
+        if len(self.ready_queue) > 1:
+            self._sort_ready_queue()
 
         # free output tensors of predecessors whose consumers are all done
         for parent in self.g.predecessors(task_node):
@@ -264,7 +264,7 @@ class HPCClusterEnv(gym.Env):
 
         task_idx  = self.ready_queue[0]
         task_node = self.nodes[task_idx]
-        task_emb  = self.node_embeddings[task_idx].astype(np.float32)
+        task_emb  = self.task_features[task_idx]
 
         task_flops   = self.g.nodes[task_node].get("flops", 0.0)
         task_compute = max(task_flops / self.stream_flops, 1e-9)
@@ -314,11 +314,53 @@ class HPCClusterEnv(gym.Env):
 
     def _zero_obs(self) -> dict:
         return {
-            "task_emb":   np.zeros(config.HIDDEN_DIM, dtype=np.float32),
+            "task_emb":   np.zeros(config.TASK_FEAT_DIM, dtype=np.float32),
             "proc_feat":  np.zeros(config.MAX_STREAMS * 4, dtype=np.float32),
             "gpu_state":  np.zeros(5, dtype=np.float32),
             "valid_mask": np.ones(config.MAX_STREAMS, dtype=np.int8),
         }
+
+    def _sort_ready_queue(self):
+        """Sort ready queue by rank_u descending — highest priority task first.
+        This mirrors HEFT's task ordering, so the agent only needs to learn
+        which stream to use (not which task to schedule next)."""
+        if len(self.ready_queue) > 1:
+            self.ready_queue = deque(
+                sorted(self.ready_queue,
+                       key=lambda i: self.rank_u_vals[self.nodes[i]],
+                       reverse=True)
+            )
+
+    def _compute_task_features(self) -> np.ndarray:
+        """Per-node structural features that give the policy HEFT-relevant information.
+
+        Features (TASK_FEAT_DIM = 6):
+          0  rank_u_norm    — HEFT upward rank: higher = schedule this task sooner
+          1  compute_norm   — task compute time relative to the heaviest task
+          2  in_degree_norm — number of predecessors / (n-1)
+          3  out_degree_norm— number of successors / (n-1)  (fan-out = impact)
+          4  mem_norm       — output tensor size / GPU_MEMORY_MAX
+          5  transfer_norm  — activation transfer size / GPU_MEMORY_MAX
+        """
+        n    = len(self.nodes)
+        feat = np.zeros((n, config.TASK_FEAT_DIM), dtype=np.float32)
+
+        # Reuse rank_u already computed in reset() — no redundant traversal
+        rank_u    = self.rank_u_vals
+        max_rank  = max(rank_u.values()) if rank_u else 1.0
+        max_flops = max(
+            (self.g.nodes[nd].get("flops", 0.0) for nd in self.nodes), default=1.0
+        )
+
+        for i, nd in enumerate(self.nodes):
+            feat[i, 0] = rank_u[nd] / max(max_rank, 1e-9)
+            feat[i, 1] = self.g.nodes[nd].get("flops", 0.0) / max(max_flops, 1e-9)
+            feat[i, 2] = self.g.in_degree(nd)  / max(n - 1, 1)
+            feat[i, 3] = self.g.out_degree(nd) / max(n - 1, 1)
+            feat[i, 4] = self.g.nodes[nd].get("mem_byte",      0.0) / config.GPU_MEMORY_MAX
+            feat[i, 5] = self.g.nodes[nd].get("transfer_byte", 0.0) / config.GPU_MEMORY_MAX
+
+        return feat
 
     def _compute_lower_bound(self) -> float:
         """max(critical_path_time, total_flops / GPU_FLOPS_CAP)"""
